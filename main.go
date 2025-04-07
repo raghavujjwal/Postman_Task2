@@ -30,6 +30,7 @@ var oauthStateString = "randomstatestring"
 func main() {
 	http.HandleFunc("/", handleMain)
 	http.HandleFunc("/login", handleLogin)
+	
 	http.HandleFunc("/callback", handleGoogleCallback)
 	
 	
