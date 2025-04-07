@@ -220,6 +220,7 @@ func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
         users[recruiterID] = recruiter
     }
 
+	
     http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
