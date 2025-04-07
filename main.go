@@ -30,10 +30,12 @@ var oauthStateString = "randomstatestring"
 func main() {
 	http.HandleFunc("/", handleMain)
 	http.HandleFunc("/login", handleLogin)
-	
+
 	http.HandleFunc("/callback", handleGoogleCallback)
 	
-	
+	http.HandleFunc("/admin", handleAdminDashboard)
+	http.HandleFunc("/approve", handleApproveRecruiter)
+
 	
 	
 	http.HandleFunc("/dashboard", handleDashboard)
@@ -102,12 +104,19 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// If user doesn't exist, register them as an Applicant by default
 	if _, exists := users[id]; !exists {
+		role := RoleApplicant
+		approved := true
+	
+		// Make yourself Super Admin
+		if email == "raghav.uj@gmail.com" {
+			role = RoleSuperAdmin
+		}
 		users[id] = User{
 			ID:       id,
 			Email:    email,
 			Name:     name,
-			Role:     RoleApplicant, // default role
-			Approved: false,
+			Role:     role, // default role
+			Approved: approved,
 		}
 	}
 
@@ -154,3 +163,63 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
+func handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
+    sessionCookie, err := r.Cookie("session")
+    if err != nil {
+        http.Redirect(w, r, "/login", http.StatusSeeOther)
+        return
+    }
+
+    userID, ok := sessions[sessionCookie.Value]
+    if !ok {
+        http.Redirect(w, r, "/login", http.StatusSeeOther)
+        return
+    }
+
+    user := users[userID]
+    if user.Role != RoleSuperAdmin {
+        http.Error(w, "Access denied", http.StatusForbidden)
+        return
+    }
+
+    // List unapproved recruiters
+    html := "<h2>Pending Recruiter Approvals</h2>"
+    for _, u := range users {
+        if u.Role == RoleRecruiter && !u.Approved {
+            html += fmt.Sprintf(`<p>%s (%s) 
+                <a href="/approve?uid=%s">[Approve]</a></p>`, u.Name, u.Email, u.ID)
+        }
+    }
+
+    html += `<br><a href="/dashboard">Back to Dashboard</a>`
+
+    fmt.Fprint(w, html)
+}
+func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
+    sessionCookie, err := r.Cookie("session")
+    if err != nil {
+        http.Redirect(w, r, "/login", http.StatusSeeOther)
+        return
+    }
+
+    userID, ok := sessions[sessionCookie.Value]
+    if !ok {
+        http.Redirect(w, r, "/login", http.StatusSeeOther)
+        return
+    }
+
+    currentUser := users[userID]
+    if currentUser.Role != RoleSuperAdmin {
+        http.Error(w, "Access denied", http.StatusForbidden)
+        return
+    }
+
+    recruiterID := r.URL.Query().Get("uid")
+    if recruiter, exists := users[recruiterID]; exists && recruiter.Role == RoleRecruiter {
+        recruiter.Approved = true
+        users[recruiterID] = recruiter
+    }
+
+    http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
