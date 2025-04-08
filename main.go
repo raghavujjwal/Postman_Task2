@@ -27,6 +27,7 @@ func main() {
 	http.HandleFunc("/login", handleLogin)
 
 	http.HandleFunc("/callback", handleGoogleCallback)
+	http.HandleFunc("/recruiter-info", handleRecruiterInfo)
 
 	http.HandleFunc("/admin", handleAdminDashboard)
 	http.HandleFunc("/approve", handleApproveRecruiter)
@@ -56,6 +57,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 var (
 	sessions = make(map[string]User)
 	users    = make(map[string]User)
+	jobs  []Job
 )
 
 type Role string
@@ -72,6 +74,7 @@ type User struct {
 	Name     string
 	Role     Role
 	Approved bool
+	Company *Company
 }
 
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +103,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	if _, exists := users[id]; !exists {
 		var role Role
 		var approved bool
-		name := name // Default from Google
+		var company *Company
 
 		switch email {
 		case "raghav.uj@gmail.com":
@@ -110,7 +113,27 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		case "mosd472@gmail.com":
 			role = RoleRecruiter
 			approved = false
-			name = "Recruiter"
+			company = nil
+
+			users[id] = User{
+				ID:       id,
+				Email:    email,
+				Name:     "Recruiter",
+				Role:     role,
+				Approved: approved,
+				Company:  company,
+			}
+
+			sessionID := uuid.New().String()
+			sessions[sessionID] = users[id]
+			http.SetCookie(w, &http.Cookie{
+				Name:  "session",
+				Value: sessionID,
+				Path:  "/",
+			})
+
+			http.Redirect(w, r, "/recruiter-info", http.StatusSeeOther)
+			return
 
 		default:
 			role = RoleApplicant
@@ -123,6 +146,8 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			Name:     name,
 			Role:     role,
 			Approved: approved,
+			Company:  company,
+			
 		}
 	}
 
@@ -137,6 +162,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
+
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 if !ok {
@@ -263,4 +289,126 @@ if !ok {
 		fmt.Fprint(w, "Invalid recruiter ID")
 	}
 }
+
+func handleRecruiterInfo(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleRecruiter {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
+
+	// Already has company info
+	if user.Company != nil {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		// Show the form
+		fmt.Fprintf(w, `
+			<h2>Enter Company Details</h2>
+			<form method="POST">
+				<label>Company Name:</label><br>
+				<input type="text" name="name" required><br><br>
+
+				<label>Description:</label><br>
+				<textarea name="description" required></textarea><br><br>
+
+				<label>Logo URL:</label><br>
+				<input type="text" name="logo" required><br><br>
+
+				<input type="submit" value="Submit">
+			</form>
+		`)
+	} else if r.Method == http.MethodPost {
+		// 💡 Here’s the important POST handler logic
+		name := r.FormValue("name")
+		description := r.FormValue("description")
+		logo := r.FormValue("logo")
+
+		company := &Company{
+			Name:        name,
+			Description: description,
+			LogoURL:     logo,
+			Approved:    false, // Super Admin will approve
+		}
+
+		// Update the user's company details
+		updatedUser := user
+		updatedUser.Company = company
+		users[user.ID] = updatedUser
+		sessions[getSessionID(r)] = updatedUser
+
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
+func getSessionID(r *http.Request) string {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+type Company struct {
+	Name        string
+	Description string
+	LogoURL     string
+	Approved    bool
+}
+type Job struct {
+	ID          string
+	Title       string
+	Description string
+	Skills      []string
+	CompanyID   string
+	PostedBy    string // Recruiter ID
+}
+
+type Applicant struct {
+	ID       string
+	Name     string
+	Email    string
+	Skills   []string
+	Resume   string
+}
+
+type InterviewRequest struct {
+	ID          string
+	JobID       string
+	ApplicantID string
+	Status      string // pending, accepted, rejected
+}
+func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleRecruiter || !user.Approved {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
+
+	fmt.Fprintf(w, `<h2>Recruiter Dashboard</h2>`)
+	fmt.Fprintf(w, `<p>Welcome, %s (%s)</p>`, user.Name, user.Email)
+
+	// Link to post a new job
+	fmt.Fprintf(w, `<a href="/recruiter/post-job">Post a New Job</a><br><br>`)
+
+	// Link to search applicants
+	fmt.Fprintf(w, `<a href="/recruiter/search">Search Applicants by Skill</a><br><br>`)
+
+	// Show posted jobs
+	fmt.Fprintf(w, `<h3>Your Job Postings</h3>`)
+	found := false
+	for _, job := range jobs {
+		if job.PostedBy == user.ID {
+			found = true
+			fmt.Fprintf(w, `<p><b>%s</b><br>%s<br>Skills: %v</p>`, job.Title, job.Description, job.Skills)
+		}
+	}
+	if !found {
+		fmt.Fprint(w, "No jobs posted yet.")
+	}
+}
+
+
+
 
