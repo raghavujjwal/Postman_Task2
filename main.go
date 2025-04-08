@@ -34,6 +34,9 @@ func main() {
 	http.HandleFunc("/dashboard", handleDashboard)
 	http.HandleFunc("/logout", handleLogout)
 
+	
+
+
 	fmt.Println("Server starting at http://localhost:8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -135,20 +138,21 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("session")
-	if err != nil {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
+	user, ok := getUserFromSession(r)
+if !ok {
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	return
+}
 
-	user, exists := sessions[cookie.Value]
-	if !exists {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	
+	if user.Role == RoleRecruiter && !user.Approved {
+		fmt.Fprint(w, "Your recruiter account is pending approval by a Super Admin.")
 		return
 	}
 
 	fmt.Fprintf(w, "Welcome %s! Your role is: %s<br><br><a href=\"/logout\">Logout</a>", user.Name, user.Role)
 }
+
 
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -165,30 +169,42 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 func handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
-	sessionCookie, err := r.Cookie("session")
-	if err != nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	user, ok := sessions[sessionCookie.Value]
+	user, ok := getUserFromSession(r)
 	if !ok || user.Role != RoleSuperAdmin {
-		http.Error(w, "Access denied", http.StatusForbidden)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	html := "<h2>Pending Recruiter Approvals</h2>"
+	fmt.Fprint(w, `<h2>Pending Recruiter Approvals</h2>`)
 	for _, u := range users {
 		if u.Role == RoleRecruiter && !u.Approved {
-			html += fmt.Sprintf(`<p>%s (%s) 
-                <a href="/approve?uid=%s">[Approve]</a></p>`, u.Name, u.Email, u.ID)
+			fmt.Fprintf(w, `<p>Recruiter (%s) 
+                <a href="/approve?uid=%s">[Approve]</a></p><br>`, u.Email, u.ID)
 		}
 	}
-
-	html += `<br><a href="/dashboard">Back to Dashboard</a>`
-
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, `<a href="/dashboard">Back to Dashboard</a>`)
 }
+
+func getUserFromSession(r *http.Request) (User, bool) {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return User{}, false
+	}
+
+	userID, ok := sessions[cookie.Value]
+	if !ok {
+		return User{}, false
+	}
+
+	user, ok := users[userID.ID]
+	if !ok {
+		return User{}, false
+	}
+
+	return user, true
+}
+
+
 
 func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
 	sessionCookie, err := r.Cookie("session")
@@ -211,3 +227,40 @@ func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
 
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	_, ok := getUserFromSession(r)
+if !ok {
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	return
+}
+
+	
+
+	fmt.Fprintln(w, "Recruiters pending approval:<br><br>")
+	for id, u := range users {
+		if u.Role == RoleRecruiter && !u.Approved {
+			fmt.Fprintf(w, "Name: %s, Email: %s - <a href=\"/approve?id=%s\">Approve</a><br>", u.Name, u.Email, id)
+		}
+	}
+}
+
+func handleApprove(w http.ResponseWriter, r *http.Request) {
+	_, ok := getUserFromSession(r)
+if !ok {
+	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	return
+}
+
+	
+
+	id := r.URL.Query().Get("id")
+	recruiter, exists := users[id]
+	if exists && recruiter.Role == RoleRecruiter {
+		recruiter.Approved = true
+		users[id] = recruiter
+		fmt.Fprintf(w, "Approved recruiter: %s", recruiter.Email)
+	} else {
+		fmt.Fprint(w, "Invalid recruiter ID")
+	}
+}
+
