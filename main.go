@@ -40,6 +40,7 @@ func main() {
 	http.HandleFunc("/callback", handleGoogleCallback)
 	http.HandleFunc("/recruiter-info", handleRecruiterInfo)
 	http.HandleFunc("/applicant/upload-cv", handleUploadCV)
+	http.HandleFunc("/superadmin/dashboard", handleSuperAdminDashboard)
 
 	http.HandleFunc("/admin", handleAdminDashboard)
 	http.HandleFunc("/approve", handleApproveRecruiter)
@@ -139,6 +140,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	email := userInfo["email"].(string)
 	name := userInfo["name"].(string)
 
+	// Create user if not exists
 	if _, exists := users[id]; !exists {
 		var role Role
 		var approved bool
@@ -149,34 +151,18 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			role = RoleSuperAdmin
 			approved = true
 
-		case "mosd472@gmail.com":
+		default:
+			// Assume applicant by default
+			role = RoleApplicant
+			approved = true
+		}
+
+		// Recruiter logic (email or pattern based)
+		if email == "mosd472@gmail.com" || strings.Contains(email, "recruit") {
 			role = RoleRecruiter
 			approved = false
 			company = nil
-
-			users[id] = User{
-				ID:       id,
-				Email:    email,
-				Name:     "Recruiter",
-				Role:     role,
-				Approved: approved,
-				Company:  company,
-			}
-
-			sessionID := uuid.New().String()
-			sessions[sessionID] = users[id]
-			http.SetCookie(w, &http.Cookie{
-				Name:  "session",
-				Value: sessionID,
-				Path:  "/",
-			})
-
-			http.Redirect(w, r, "/recruiter-info", http.StatusSeeOther)
-			return
-
-		default:
-			role = RoleApplicant
-			approved = true
+			name = "Recruiter"
 		}
 
 		users[id] = User{
@@ -186,10 +172,10 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			Role:     role,
 			Approved: approved,
 			Company:  company,
-			
 		}
 	}
 
+	// ✅ Create session
 	sessionID := uuid.New().String()
 	sessions[sessionID] = users[id]
 
@@ -199,8 +185,16 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		Path:  "/",
 	})
 
+	// 🚦 Redirect logic
+	user := users[id]
+	if user.Role == RoleRecruiter && !user.Approved {
+		http.Redirect(w, r, "/recruiter-info", http.StatusSeeOther)
+		return
+	}
+
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
+
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
@@ -209,18 +203,29 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect based on role
+	// 🔁 Always refresh user from the users map
+	if latest, exists := users[user.ID]; exists {
+		user = latest
+		sessions[getSessionID(r)] = latest // Sync session with latest user
+	}
+
+	fmt.Println("DEBUG: Recruiter session check →", user.Email, "| Approved:", user.Approved)
+
+	// 🚦 Role-based redirection
 	switch user.Role {
 	case RoleSuperAdmin:
-		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		http.Redirect(w, r, "/superadmin/dashboard", http.StatusSeeOther)
+
 	case RoleRecruiter:
 		if !user.Approved {
 			fmt.Fprint(w, `<html><body><p>Your recruiter account is pending approval by a Super Admin.</p></body></html>`)
 			return
 		}
 		http.Redirect(w, r, "/recruiter/dashboard", http.StatusSeeOther)
+
 	case RoleApplicant:
 		http.Redirect(w, r, "/applicant/jobs", http.StatusSeeOther)
+
 	default:
 		http.Error(w, "Invalid role", http.StatusForbidden)
 	}
@@ -255,7 +260,8 @@ func handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
                 <a href="/approve?uid=%s">[Approve]</a></p><br>`, u.Email, u.ID)
 		}
 	}
-	fmt.Fprint(w, `<br><a href="/dashboard">Back to Dashboard</a>`)
+	fmt.Fprint(w, `<br><a href="/superadmin/dashboard">Back to Admin Home</a>`)
+
 }
 
 
@@ -265,42 +271,56 @@ func getUserFromSession(r *http.Request) (User, bool) {
 		return User{}, false
 	}
 
-	userID, ok := sessions[cookie.Value]
-	if !ok {
-		return User{}, false
+	sessionID := cookie.Value
+	user, ok := sessions[sessionID]
+	if ok {
+		return user, true
 	}
 
-	user, ok := users[userID.ID]
-	if !ok {
-		return User{}, false
-	}
-
-	return user, true
+	// 💡 Dev fallback (not for production!)
+	// Try finding user by ID in cookie (if you saved it in value), or skip fallback
+	fmt.Println("⚠️ Session not found for ID:", sessionID)
+	return User{}, false
 }
-
-
-
 func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
+	// Get Super Admin's session
 	sessionCookie, err := r.Cookie("session")
 	if err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 
-	user, ok := sessions[sessionCookie.Value]
-	if !ok || user.Role != RoleSuperAdmin {
+	adminUser, ok := sessions[sessionCookie.Value]
+	if !ok || adminUser.Role != RoleSuperAdmin {
 		http.Error(w, "Access denied", http.StatusForbidden)
 		return
 	}
 
+	// Get recruiter ID to approve
 	recruiterID := r.URL.Query().Get("uid")
-	if recruiter, exists := users[recruiterID]; exists && recruiter.Role == RoleRecruiter {
+	recruiter, exists := users[recruiterID]
+	if exists && recruiter.Role == RoleRecruiter {
+		// ✅ Update approval status
 		recruiter.Approved = true
 		users[recruiterID] = recruiter
+
+		// ✅ Update recruiter in all active sessions
+		for sid, sessUser := range sessions {
+			if sessUser.ID == recruiterID {
+				sessions[sid] = recruiter
+				fmt.Println("✅ Session updated for:", recruiter.Email)
+				fmt.Println("DEBUG: Final recruiter in sessions →", sessions[sid].Approved)
+			}
+		}
+	} else {
+		fmt.Println("⚠️ Recruiter not found or invalid role for ID:", recruiterID)
 	}
 
+	// ✅ Redirect back to admin dashboard
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
+
+
 func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	_, ok := getUserFromSession(r)
 	if !ok {
@@ -434,8 +454,20 @@ type Applicant struct {
 
 func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
-	if !ok || user.Role != RoleRecruiter || !user.Approved {
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	if !ok {
+		fmt.Println("⚠️ Recruiter dashboard: no session found")
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	fmt.Println("✅ Recruiter dashboard loaded for:", user.Email, "Approved:", user.Approved)
+
+	if user.Role != RoleRecruiter {
+		http.Error(w, "Access denied", http.StatusForbidden)
+		return
+	}
+	if !user.Approved {
+		http.Error(w, "You are not approved yet", http.StatusForbidden)
 		return
 	}
 
@@ -893,6 +925,27 @@ func handleFollowCompany(w http.ResponseWriter, r *http.Request) {
 	companyFollowers[company] = append(companyFollowers[company], user.ID)
 
 	http.Redirect(w, r, "/applicant/jobs", http.StatusSeeOther)
+}
+func handleSuperAdminDashboard(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleSuperAdmin {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Dashboard page
+	fmt.Fprint(w, `<html><head><title>Super Admin Dashboard</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
+	fmt.Fprintf(w, `<h2>Welcome, %s (Super Admin)</h2>`, user.Name)
+
+	// Admin links
+	fmt.Fprint(w, `
+		<ul>
+			<li><a href="/admin">Pending Recruiter Approvals</a></li>
+			<li><a href="/logout">Logout</a></li>
+		</ul>
+	`)
 }
 
 
