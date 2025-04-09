@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
+
 
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
@@ -34,6 +36,8 @@ func main() {
 
 	http.HandleFunc("/dashboard", handleDashboard)
 	http.HandleFunc("/logout", handleLogout)
+	http.HandleFunc("/applicant/jobs", handleApplicantJobs)
+	http.HandleFunc("/apply", handleApplyToJob)
 
 	
 
@@ -43,22 +47,35 @@ func main() {
 }
 
 func handleMain(w http.ResponseWriter, r *http.Request) {
-	html := `<html><body>
-	<a href="/login">Sign In with Google</a>
-	</body></html>`
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, `
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<title>Login</title>
+		</head>
+		<body>
+			<h2>Welcome to the Job Portal</h2>
+			<a href="/login">Sign In with Google</a>
+		</body>
+		</html>
+	`)
 }
+
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	url := googleOauthConfig.AuthCodeURL(oauthStateString)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
+
 var (
 	sessions = make(map[string]User)
 	users    = make(map[string]User)
-	jobs  []Job
+	jobs     = make(map[string]Job)
+	jobApplications = make(map[string][]string) 
+
 )
+
 
 type Role string
 
@@ -75,6 +92,7 @@ type User struct {
 	Role     Role
 	Approved bool
 	Company *Company
+	Skills []string
 }
 
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
@@ -165,19 +183,23 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
-if !ok {
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	return
-}
-
-	
-	if user.Role == RoleRecruiter && !user.Approved {
-		fmt.Fprint(w, "Your recruiter account is pending approval by a Super Admin.")
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	fmt.Fprintf(w, "Welcome %s! Your role is: %s<br><br><a href=\"/logout\">Logout</a>", user.Name, user.Role)
+	fmt.Fprint(w, `<html><head><title>Dashboard</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
+	if user.Role == RoleRecruiter && !user.Approved {
+		fmt.Fprint(w, `<p>Your recruiter account is pending approval by a Super Admin.</p>`)
+		return
+	}
+
+	fmt.Fprintf(w, `<p>Welcome <strong>%s</strong>! Your role is: <em>%s</em></p>`, user.Name, user.Role)
+	fmt.Fprint(w, `<a href="/logout">Logout</a>`)
 }
+
 
 
 
@@ -201,6 +223,9 @@ func handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Fprint(w, `<html><head><title>Admin Dashboard</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
 	fmt.Fprint(w, `<h2>Pending Recruiter Approvals</h2>`)
 	for _, u := range users {
 		if u.Role == RoleRecruiter && !u.Approved {
@@ -208,8 +233,9 @@ func handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
                 <a href="/approve?uid=%s">[Approve]</a></p><br>`, u.Email, u.ID)
 		}
 	}
-	fmt.Fprint(w, `<a href="/dashboard">Back to Dashboard</a>`)
+	fmt.Fprint(w, `<br><a href="/dashboard">Back to Dashboard</a>`)
 }
+
 
 func getUserFromSession(r *http.Request) (User, bool) {
 	cookie, err := r.Cookie("session")
@@ -255,40 +281,46 @@ func handleApproveRecruiter(w http.ResponseWriter, r *http.Request) {
 }
 func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	_, ok := getUserFromSession(r)
-if !ok {
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	return
-}
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-	
+	fmt.Fprint(w, `<html><head><title>Admin Panel</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
 
-	fmt.Fprintln(w, "Recruiters pending approval:<br><br>")
+	fmt.Fprintln(w, `<h2>Recruiters Pending Approval</h2><br>`)
 	for id, u := range users {
 		if u.Role == RoleRecruiter && !u.Approved {
-			fmt.Fprintf(w, "Name: %s, Email: %s - <a href=\"/approve?id=%s\">Approve</a><br>", u.Name, u.Email, id)
+			fmt.Fprintf(w, `Name: %s, Email: %s - <a href="/approve?id=%s">Approve</a><br>`, u.Name, u.Email, id)
 		}
 	}
 }
 
+
 func handleApprove(w http.ResponseWriter, r *http.Request) {
 	_, ok := getUserFromSession(r)
-if !ok {
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	return
-}
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-	
+	fmt.Fprint(w, `<html><head><title>Approval Status</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
 
 	id := r.URL.Query().Get("id")
 	recruiter, exists := users[id]
 	if exists && recruiter.Role == RoleRecruiter {
 		recruiter.Approved = true
 		users[id] = recruiter
-		fmt.Fprintf(w, "Approved recruiter: %s", recruiter.Email)
+		fmt.Fprintf(w, "<p>✅ Approved recruiter: %s</p>", recruiter.Email)
 	} else {
-		fmt.Fprint(w, "Invalid recruiter ID")
+		fmt.Fprint(w, "<p>❌ Invalid recruiter ID</p>")
 	}
+
+	fmt.Fprint(w, `<br><a href="/admin">Back to Admin Dashboard</a>`)
 }
+
 
 func handleRecruiterInfo(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
@@ -304,8 +336,11 @@ func handleRecruiterInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet {
-		// Show the form
-		fmt.Fprintf(w, `
+		// ✅ Wrap form in proper HTML
+		fmt.Fprint(w, `<html><head><title>Company Info</title></head><body>`)
+		defer fmt.Fprint(w, `</body></html>`)
+
+		fmt.Fprint(w, `
 			<h2>Enter Company Details</h2>
 			<form method="POST">
 				<label>Company Name:</label><br>
@@ -321,7 +356,7 @@ func handleRecruiterInfo(w http.ResponseWriter, r *http.Request) {
 			</form>
 		`)
 	} else if r.Method == http.MethodPost {
-		// 💡 Here’s the important POST handler logic
+		// ✅ Process form data
 		name := r.FormValue("name")
 		description := r.FormValue("description")
 		logo := r.FormValue("logo")
@@ -342,6 +377,7 @@ func handleRecruiterInfo(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }
+
 
 func getSessionID(r *http.Request) string {
 	cookie, err := r.Cookie("session")
@@ -386,6 +422,9 @@ func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Fprint(w, `<html><head><title>Recruiter Dashboard</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
 	fmt.Fprintf(w, `<h2>Recruiter Dashboard</h2>`)
 	fmt.Fprintf(w, `<p>Welcome, %s (%s)</p>`, user.Name, user.Email)
 
@@ -405,9 +444,153 @@ func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !found {
-		fmt.Fprint(w, "No jobs posted yet.")
+		fmt.Fprint(w, `<p>No jobs posted yet.</p>`)
 	}
 }
+
+func handlePostJob(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleRecruiter || !user.Approved {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		fmt.Fprint(w, `<html><head><title>Post a Job</title></head><body>`)
+		defer fmt.Fprint(w, `</body></html>`)
+
+		fmt.Fprint(w, `
+			<h2>Post a Job</h2>
+			<form method="POST">
+				<label>Job Title:</label><br>
+				<input type="text" name="title" required><br><br>
+
+				<label>Description:</label><br>
+				<textarea name="description" required></textarea><br><br>
+
+				<label>Skills (comma-separated):</label><br>
+				<input type="text" name="skills" required><br><br>
+
+				<input type="submit" value="Post Job">
+			</form>
+		`)
+	} else if r.Method == http.MethodPost {
+		title := r.FormValue("title")
+		description := r.FormValue("description")
+		skillStr := r.FormValue("skills")
+		skills := parseSkills(skillStr)
+
+		job := Job{
+			ID:          uuid.New().String(),
+			Title:       title,
+			Description: description,
+			Skills:      skills,
+			CompanyID:   user.ID, // assuming 1 recruiter = 1 company
+			PostedBy:    user.ID,
+		}
+
+		jobs[job.ID] = job
+
+		http.Redirect(w, r, "/recruiter/dashboard", http.StatusSeeOther)
+	}
+}
+
+
+func parseSkills(s string) []string {
+	var result []string
+	for _, skill := range strings.Split(s, ",") {
+		result = append(result, strings.TrimSpace(skill))
+	}
+	return result
+}
+func handleApplicantJobs(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleApplicant {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	fmt.Fprint(w, `<html><head><title>Available Jobs</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
+	fmt.Fprint(w, `<h2>Available Jobs</h2>`)
+
+	for jobID, job := range jobs {
+		// Check if job is posted by an approved recruiter
+		recruiter, ok := users[job.PostedBy]
+		if !ok || !recruiter.Approved {
+			continue
+		}
+
+		// Match applicant skills
+		matched := false
+		for _, skill := range job.Skills {
+			for _, applicantSkill := range user.Skills {
+				if strings.EqualFold(skill, applicantSkill) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		// Check if already applied
+		applied := false
+		for _, applicantID := range jobApplications[jobID] {
+			if applicantID == user.ID {
+				applied = true
+				break
+			}
+		}
+
+		// Render job block
+		fmt.Fprintf(w, `<div><b>%s</b><br>%s<br>Skills: %v<br>`, job.Title, job.Description, job.Skills)
+		if applied {
+			fmt.Fprint(w, `<i>Already Applied</i>`)
+		} else {
+			fmt.Fprintf(w, `
+				<form action="/applicant/apply" method="POST">
+					<input type="hidden" name="job_id" value="%s">
+					<input type="submit" value="Apply">
+				</form>`, jobID)
+		}
+		fmt.Fprint(w, `</div><hr>`)
+	}
+}
+
+
+	
+
+func handleApplyToJob(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleApplicant {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	jobID := r.URL.Query().Get("jobid")
+	if _, exists := jobs[jobID]; !exists {
+		http.Error(w, "Job not found", http.StatusNotFound)
+		return
+	}
+
+	// Add applicant ID to jobApplications map
+	jobApplications[jobID] = append(jobApplications[jobID], user.ID)
+
+	fmt.Fprint(w, `<html><head><title>Application Status</title></head><body>`)
+	defer fmt.Fprint(w, `</body></html>`)
+
+	fmt.Fprintf(w, `<p>✅ You have successfully applied to job: <b>%s</b></p>`, jobID)
+	fmt.Fprint(w, `<a href="/applicant/jobs">Back to Jobs</a>`)
+}
+
+
+
 
 
 
