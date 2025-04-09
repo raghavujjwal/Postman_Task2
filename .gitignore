@@ -1,0 +1,11 @@
+# Go build files
+bin/
+*.exe
+*.out
+
+# IDE / editor junk
+.vscode/
+*.swp
+
+# Env files
+.env
