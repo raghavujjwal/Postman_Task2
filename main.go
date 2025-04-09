@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"io"
 	"net/http"
 	"strings"
-
-
+	"net/smtp"
+	"os"
+	"github.com/joho/godotenv"
+	"github.com/ledongthuc/pdf"
+	"path/filepath"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"bytes"
 )
 
 var googleOauthConfig = &oauth2.Config{
@@ -25,11 +30,16 @@ var googleOauthConfig = &oauth2.Config{
 var oauthStateString = "randomstatestring"
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(" Error loading .env file")
+	}
 	http.HandleFunc("/", handleMain)
 	http.HandleFunc("/login", handleLogin)
 
 	http.HandleFunc("/callback", handleGoogleCallback)
 	http.HandleFunc("/recruiter-info", handleRecruiterInfo)
+	http.HandleFunc("/applicant/upload-cv", handleUploadCV)
 
 	http.HandleFunc("/admin", handleAdminDashboard)
 	http.HandleFunc("/approve", handleApproveRecruiter)
@@ -37,7 +47,9 @@ func main() {
 	http.HandleFunc("/dashboard", handleDashboard)
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/applicant/jobs", handleApplicantJobs)
-	http.HandleFunc("/apply", handleApplyToJob)
+	http.HandleFunc("/recruiter/view-applicants", handleViewApplicantsForJob)
+
+	http.HandleFunc("/recruiter/schedule", handleScheduleInterview)
 
 	
 
@@ -73,6 +85,8 @@ var (
 	users    = make(map[string]User)
 	jobs     = make(map[string]Job)
 	jobApplications = make(map[string][]string) 
+	interviewRequests = make(map[string]InterviewRequest)
+
 
 )
 
@@ -91,9 +105,11 @@ type User struct {
 	Name     string
 	Role     Role
 	Approved bool
-	Company *Company
-	Skills []string
+	Company  *Company
+	Skills   []string
+	Resume   string // path to uploaded file
 }
+
 
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
@@ -188,21 +204,22 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprint(w, `<html><head><title>Dashboard</title></head><body>`)
-	defer fmt.Fprint(w, `</body></html>`)
-
-	if user.Role == RoleRecruiter && !user.Approved {
-		fmt.Fprint(w, `<p>Your recruiter account is pending approval by a Super Admin.</p>`)
-		return
+	// Redirect based on role
+	switch user.Role {
+	case RoleSuperAdmin:
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	case RoleRecruiter:
+		if !user.Approved {
+			fmt.Fprint(w, `<html><body><p>Your recruiter account is pending approval by a Super Admin.</p></body></html>`)
+			return
+		}
+		http.Redirect(w, r, "/recruiter/dashboard", http.StatusSeeOther)
+	case RoleApplicant:
+		http.Redirect(w, r, "/applicant/jobs", http.StatusSeeOther)
+	default:
+		http.Error(w, "Invalid role", http.StatusForbidden)
 	}
-
-	fmt.Fprintf(w, `<p>Welcome <strong>%s</strong>! Your role is: <em>%s</em></p>`, user.Name, user.Role)
-	fmt.Fprint(w, `<a href="/logout">Logout</a>`)
 }
-
-
-
-
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("session")
 	if err == nil {
@@ -409,12 +426,7 @@ type Applicant struct {
 	Resume   string
 }
 
-type InterviewRequest struct {
-	ID          string
-	JobID       string
-	ApplicantID string
-	Status      string // pending, accepted, rejected
-}
+
 func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 	if !ok || user.Role != RoleRecruiter || !user.Approved {
@@ -566,30 +578,259 @@ func handleApplicantJobs(w http.ResponseWriter, r *http.Request) {
 
 	
 
-func handleApplyToJob(w http.ResponseWriter, r *http.Request) {
+func handleViewApplicantsForJob(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleRecruiter || !user.Approved {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	jobID := r.URL.Query().Get("jobid")
+	job, exists := jobs[jobID]
+	if !exists || job.PostedBy != user.ID {
+		http.Error(w, "Job not found or unauthorized", http.StatusForbidden)
+		return
+	}
+
+	fmt.Fprintf(w, `<html><head><title>Applicants</title></head><body>`)
+	fmt.Fprintf(w, `<h2>Applicants for Job: %s</h2>`, job.Title)
+
+	applicants := jobApplications[jobID]
+	if len(applicants) == 0 {
+		fmt.Fprint(w, `<p>No applicants yet.</p>`)
+	} else {
+		for _, applicantID := range applicants {
+			applicant := users[applicantID]
+			fmt.Fprintf(w, `<div style="border:1px solid #ccc; padding:10px; margin:10px;">
+				<p><b>Name:</b> %s<br><b>Email:</b> %s</p>`, applicant.Name, applicant.Email)
+
+			if applicant.Resume != "" {
+				fmt.Fprintf(w, `
+					<form method="POST" action="/recruiter/parse-resume">
+						<input type="hidden" name="applicant_id" value="%s">
+						<input type="submit" value="Parse Resume">
+					</form>`, applicant.ID)
+			} else {
+				fmt.Fprint(w, `<i>No resume uploaded</i>`)
+			}
+			fmt.Fprint(w, `</div>`)
+		}
+	}
+
+	fmt.Fprint(w, `<br><a href="/recruiter/dashboard">Back to Dashboard</a></body></html>`)
+}
+
+type InterviewRequest struct {
+	ID            string
+	JobID         string
+	ApplicantID   string
+	RecruiterID   string
+	Status        string // pending, accepted, rejected, reschedule_requested
+	ProposedTime  string // ISO8601 or any human-readable format
+	AlternateTime string // filled if applicant suggests a new time
+	MeetLink      string
+}
+func handleScheduleInterview(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleRecruiter || !user.Approved {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		fmt.Fprint(w, `<html><head><title>Schedule Interview</title></head><body>`)
+		defer fmt.Fprint(w, `</body></html>`)
+
+		fmt.Fprint(w, `<h2>Schedule Interview</h2>
+			<form method="POST">
+			<label>Select Job:</label><br>
+			<select name="job_id">`)
+		for _, job := range jobs {
+			if job.PostedBy == user.ID {
+				fmt.Fprintf(w, `<option value="%s">%s</option>`, job.ID, job.Title)
+			}
+		}
+		fmt.Fprint(w, `</select><br><br>`)
+
+		fmt.Fprint(w, `<label>Applicant Email:</label><br>
+			<input type="email" name="applicant_email" required><br><br>
+			<label>Proposed Time:</label><br>
+			<input type="text" name="time" placeholder="e.g. April 10, 4:00 PM" required><br><br>
+			<input type="submit" value="Send Interview Request">
+			</form>`)
+	} else if r.Method == http.MethodPost {
+		applicantEmail := r.FormValue("applicant_email")
+		proposedTime := r.FormValue("time")
+		jobID := r.FormValue("job_id")
+
+		// Lookup applicant
+		var applicantID string
+		for _, u := range users {
+			if u.Email == applicantEmail && u.Role == RoleApplicant {
+				applicantID = u.ID
+				break
+			}
+		}
+		if applicantID == "" {
+			http.Error(w, "Applicant not found", http.StatusBadRequest)
+			return
+		}
+
+		interview := InterviewRequest{
+			ID:           uuid.New().String(),
+			JobID:        jobID,
+			ApplicantID:  applicantID,
+			RecruiterID:  user.ID,
+			Status:       "pending",
+			ProposedTime: proposedTime,
+			MeetLink:     "https://meet.google.com/" + uuid.New().String()[:8],
+		}
+
+		interviewRequests[interview.ID] = interview
+
+		// Send interview email asynchronously
+		go sendEmail(users[applicantID].Email,
+			"Interview Invitation",
+			fmt.Sprintf("You have been invited for an interview on: %s\nMeet Link: %s", proposedTime, interview.MeetLink))
+
+		http.Redirect(w, r, "/recruiter/dashboard", http.StatusSeeOther)
+	}
+}
+func sendEmail(to, subject, body string) {
+	from := os.Getenv("SMTP_EMAIL")
+	pass := os.Getenv("SMTP_PASSWORD")
+	auth := smtp.PlainAuth("", from, pass, "smtp.gmail.com")
+
+	msg := []byte("To: " + to + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
+		body + "\r\n")
+
+	err := smtp.SendMail("smtp.gmail.com:587", auth, from, []string{to}, msg)
+	if err != nil {
+		log.Printf("❌ Failed to send email to %s: %v", to, err)
+	} else {
+		log.Printf("✅ Email sent to %s", to)
+	}
+}
+
+func handleUploadCV(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 	if !ok || user.Role != RoleApplicant {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	jobID := r.URL.Query().Get("jobid")
-	if _, exists := jobs[jobID]; !exists {
-		http.Error(w, "Job not found", http.StatusNotFound)
+	if r.Method == http.MethodGet {
+		fmt.Fprint(w, `<html><head><title>Upload CV</title></head><body>`)
+		defer fmt.Fprint(w, `</body></html>`)
+		fmt.Fprint(w, `
+			<h2>Upload Resume (PDF)</h2>
+			<form method="POST" enctype="multipart/form-data">
+				<input type="file" name="resume" accept="application/pdf" required><br><br>
+				<input type="submit" value="Upload CV">
+			</form>
+		`)
 		return
 	}
 
-	// Add applicant ID to jobApplications map
-	jobApplications[jobID] = append(jobApplications[jobID], user.ID)
+	// Handle file upload
+	file, handler, err := r.FormFile("resume")
+	if err != nil {
+		http.Error(w, "Failed to read file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
 
-	fmt.Fprint(w, `<html><head><title>Application Status</title></head><body>`)
-	defer fmt.Fprint(w, `</body></html>`)
+	// Save uploaded file temporarily
+	filePath := filepath.Join("uploads", user.ID+"_"+handler.Filename)
+	os.MkdirAll("uploads", os.ModePerm)
+	dst, err := os.Create(filePath)
+	if err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+	io.Copy(dst, file)
 
-	fmt.Fprintf(w, `<p>✅ You have successfully applied to job: <b>%s</b></p>`, jobID)
-	fmt.Fprint(w, `<a href="/applicant/jobs">Back to Jobs</a>`)
+	// Parse and validate PDF
+	f, rErr := os.Open(filePath)
+	if rErr != nil {
+		http.Error(w, "Failed to open uploaded file", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	reader, err := pdf.NewReader(f, handler.Size)
+	if err != nil {
+		http.Error(w, "Failed to parse PDF: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	textReader, _ := reader.GetPlainText()
+	buf := new(strings.Builder)
+	io.Copy(buf, textReader)
+	content := strings.ToLower(buf.String())
+
+
+	// Validate for keywords
+	if !strings.Contains(content, "name") ||
+		!strings.Contains(content, "skills") ||
+		!strings.Contains(content, "education") {
+		http.Error(w, "Incomplete resume: must include Name, Skills, and Education.", http.StatusBadRequest)
+		return
+	}
+
+	// Save resume path to user
+	updated := user
+	updated.Resume = filePath
+	users[user.ID] = updated
+	sessions[getSessionID(r)] = updated
+
+	fmt.Fprint(w, `<html><body><p>✅ Resume uploaded successfully!</p><a href="/dashboard">Back to Dashboard</a></body></html>`)
 }
 
+func parseResumeWithGemini(text string) (string, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" + apiKey
 
+	reqBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{
+				"parts": []map[string]string{
+					{
+						"text": "You're an expert recruiter. Summarize this resume into Name, Education, Experience, Skills, and a brief 2-line profile summary:\n\n" + text,
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(reqBody)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return "", err
+	}
+
+	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+		return result.Candidates[0].Content.Parts[0].Text, nil
+	}
+	return "No response from Gemini", nil
+}
 
 
 
