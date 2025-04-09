@@ -50,6 +50,7 @@ func main() {
 	http.HandleFunc("/recruiter/view-applicants", handleViewApplicantsForJob)
 
 	http.HandleFunc("/recruiter/schedule", handleScheduleInterview)
+	http.HandleFunc("/follow-company", handleFollowCompany)
 
 	
 
@@ -86,6 +87,10 @@ var (
 	jobs     = make(map[string]Job)
 	jobApplications = make(map[string][]string) 
 	interviewRequests = make(map[string]InterviewRequest)
+	companyFollowers = make(map[string][]string) 
+	
+
+
 
 
 )
@@ -561,7 +566,33 @@ func handleApplicantJobs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Render job block
-		fmt.Fprintf(w, `<div><b>%s</b><br>%s<br>Skills: %v<br>`, job.Title, job.Description, job.Skills)
+		companyName := ""
+if recruiter.Company != nil {
+	companyName = recruiter.Company.Name
+}
+
+fmt.Fprintf(w, `<div><b>%s</b><br>%s<br>Skills: %v<br>`, job.Title, job.Description, job.Skills)
+
+if applied {
+	fmt.Fprint(w, `<i>Already Applied</i><br>`)
+} else {
+	fmt.Fprintf(w, `
+		<form action="/applicant/apply" method="POST" style="display:inline;">
+			<input type="hidden" name="job_id" value="%s">
+			<input type="submit" value="Apply">
+		</form><br>`, jobID)
+}
+
+if companyName != "" {
+	fmt.Fprintf(w, `
+		<form action="/follow-company" method="POST">
+			<input type="hidden" name="company" value="%s">
+			<input type="submit" value="Follow %s">
+		</form>`, companyName, companyName)
+}
+
+fmt.Fprint(w, `</div><hr>`)
+
 		if applied {
 			fmt.Fprint(w, `<i>Already Applied</i>`)
 		} else {
@@ -831,6 +862,39 @@ func parseResumeWithGemini(text string) (string, error) {
 	}
 	return "No response from Gemini", nil
 }
+func handleFollowCompany(w http.ResponseWriter, r *http.Request) {
+	user, ok := getUserFromSession(r)
+	if !ok || user.Role != RoleApplicant {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	company := r.FormValue("company")
+	if company == "" {
+		http.Error(w, "Company not specified", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent duplicate follow
+	followers := companyFollowers[company]
+	for _, id := range followers {
+		if id == user.ID {
+			http.Redirect(w, r, "/applicant/jobs", http.StatusSeeOther)
+			return
+		}
+	}
+
+	// Add follower
+	companyFollowers[company] = append(companyFollowers[company], user.ID)
+
+	http.Redirect(w, r, "/applicant/jobs", http.StatusSeeOther)
+}
+
 
 
 
