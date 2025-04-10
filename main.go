@@ -30,6 +30,7 @@ var googleOauthConfig = &oauth2.Config{
 var oauthStateString = "randomstatestring"
 
 func main() {
+	initDB()
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(" Error loading .env file")
@@ -89,32 +90,8 @@ var (
 	jobApplications = make(map[string][]string) 
 	interviewRequests = make(map[string]InterviewRequest)
 	companyFollowers = make(map[string][]string) 
-	
-
-
-
-
 )
 
-
-type Role string
-
-const (
-	RoleSuperAdmin Role = "superadmin"
-	RoleRecruiter  Role = "recruiter"
-	RoleApplicant  Role = "applicant"
-)
-
-type User struct {
-	ID       string
-	Email    string
-	Name     string
-	Role     Role
-	Approved bool
-	Company  *Company
-	Skills   []string
-	Resume   string // path to uploaded file
-}
 
 
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +119,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Create user if not exists
 	if _, exists := users[id]; !exists {
-		var role Role
+		var role string
 		var approved bool
 		var company *Company
 
@@ -428,30 +405,6 @@ func getSessionID(r *http.Request) string {
 	}
 	return cookie.Value
 }
-type Company struct {
-	Name        string
-	Description string
-	LogoURL     string
-	Approved    bool
-}
-type Job struct {
-	ID          string
-	Title       string
-	Description string
-	Skills      []string
-	CompanyID   string
-	PostedBy    string // Recruiter ID
-}
-
-type Applicant struct {
-	ID       string
-	Name     string
-	Email    string
-	Skills   []string
-	Resume   string
-}
-
-
 func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 	if !ok {
@@ -487,7 +440,7 @@ func handleRecruiterDashboard(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<h3>Your Job Postings</h3>`)
 	found := false
 	for _, job := range jobs {
-		if job.PostedBy == user.ID {
+		if job.PostedByID == user.ID {
 			found = true
 			fmt.Fprintf(w, `<p><b>%s</b><br>%s<br>Skills: %v</p>`, job.Title, job.Description, job.Skills)
 		}
@@ -535,7 +488,7 @@ func handlePostJob(w http.ResponseWriter, r *http.Request) {
 			Description: description,
 			Skills:      skills,
 			CompanyID:   user.ID, // assuming 1 recruiter = 1 company
-			PostedBy:    user.ID,
+			PostedByID:    user.ID,
 		}
 
 		jobs[job.ID] = job
@@ -566,7 +519,7 @@ func handleApplicantJobs(w http.ResponseWriter, r *http.Request) {
 
 	for jobID, job := range jobs {
 		// Check if job is posted by an approved recruiter
-		recruiter, ok := users[job.PostedBy]
+		recruiter, ok := users[job.PostedByID]
 		if !ok || !recruiter.Approved {
 			continue
 		}
@@ -637,10 +590,6 @@ fmt.Fprint(w, `</div><hr>`)
 		fmt.Fprint(w, `</div><hr>`)
 	}
 }
-
-
-	
-
 func handleViewApplicantsForJob(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 	if !ok || user.Role != RoleRecruiter || !user.Approved {
@@ -650,7 +599,7 @@ func handleViewApplicantsForJob(w http.ResponseWriter, r *http.Request) {
 
 	jobID := r.URL.Query().Get("jobid")
 	job, exists := jobs[jobID]
-	if !exists || job.PostedBy != user.ID {
+	if !exists || job.PostedByID != user.ID {
 		http.Error(w, "Job not found or unauthorized", http.StatusForbidden)
 		return
 	}
@@ -682,17 +631,6 @@ func handleViewApplicantsForJob(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprint(w, `<br><a href="/recruiter/dashboard">Back to Dashboard</a></body></html>`)
 }
-
-type InterviewRequest struct {
-	ID            string
-	JobID         string
-	ApplicantID   string
-	RecruiterID   string
-	Status        string // pending, accepted, rejected, reschedule_requested
-	ProposedTime  string // ISO8601 or any human-readable format
-	AlternateTime string // filled if applicant suggests a new time
-	MeetLink      string
-}
 func handleScheduleInterview(w http.ResponseWriter, r *http.Request) {
 	user, ok := getUserFromSession(r)
 	if !ok || user.Role != RoleRecruiter || !user.Approved {
@@ -709,7 +647,7 @@ func handleScheduleInterview(w http.ResponseWriter, r *http.Request) {
 			<label>Select Job:</label><br>
 			<select name="job_id">`)
 		for _, job := range jobs {
-			if job.PostedBy == user.ID {
+			if job.PostedByID == user.ID {
 				fmt.Fprintf(w, `<option value="%s">%s</option>`, job.ID, job.Title)
 			}
 		}
