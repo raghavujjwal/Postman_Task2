@@ -30,34 +30,29 @@ var googleOauthConfig = &oauth2.Config{
 var oauthStateString = "randomstatestring"
 
 func main() {
-	initDB()
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal(" Error loading .env file")
+		log.Println(" Warning: .env file not loaded, using defaults")
 	}
+	
+	initDB()
 	http.HandleFunc("/", handleMain)
 	http.HandleFunc("/login", handleLogin)
-
 	http.HandleFunc("/callback", handleGoogleCallback)
 	http.HandleFunc("/recruiter-info", handleRecruiterInfo)
 	http.HandleFunc("/applicant/upload-cv", handleUploadCV)
 	http.HandleFunc("/superadmin/dashboard", handleSuperAdminDashboard)
-
 	http.HandleFunc("/admin", handleAdminDashboard)
 	http.HandleFunc("/approve", handleApproveRecruiter)
-
 	http.HandleFunc("/dashboard", handleDashboard)
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/applicant/jobs", handleApplicantJobs)
 	http.HandleFunc("/recruiter/view-applicants", handleViewApplicantsForJob)
-
 	http.HandleFunc("/recruiter/schedule", handleScheduleInterview)
 	http.HandleFunc("/follow-company", handleFollowCompany)
 
-	
-
-
-	fmt.Println("Server starting at http://localhost:8080...")
+	// Start server
+	fmt.Println("✅ Server starting at http://localhost:8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
